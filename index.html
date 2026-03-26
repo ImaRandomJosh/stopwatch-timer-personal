@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Timer App</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #09090b;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const formatTimeFromMins = (mins) => {
+      let h = Math.floor(mins / 60);
+      let m = mins % 60;
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12;
+      if (h === 0) h = 12;
+      return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+    };
+
+    const pad2 = (n) => n.toString().padStart(2, '0');
+
+    const formatDurationText = (totalSeconds) => {
+      const h = Math.floor(totalSeconds / 3600);
+      const m = Math.floor((totalSeconds % 3600) / 60);
+      const s = totalSeconds % 60;
+
+      const parts = [];
+      if (h) parts.push(`${h}h`);
+      if (m) parts.push(`${m}m`);
+      if (s) parts.push(`${s}s`);
+      if (parts.length === 0) return '0s';
+      return parts.join(' ');
+    };
+
+    const formatFriendlyClock = (date) => {
+      return date.toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit'
+      });
+    };
+
+    const buildCandidateDate = (baseDate, hour24, minute = 0) => {
+      const d = new Date(baseDate);
+      d.setSeconds(0, 0);
+      d.setHours(hour24, minute, 0, 0);
+      return d;
+    };
+
+    const parseAmbiguousTime = (raw, baseDate) => {
+      const match = raw.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+      if (!match) return null;
+
+      let hour = parseInt(match[1], 10);
+      const minute = parseInt(match[2] || '0', 10);
+      const ampm = match[3] ? match[3].toLowerCase() : null;
+
+      if (minute > 59 || hour > 23 || hour < 0) return null;
+
+      if (ampm) {
+        let hour24 = hour % 12;
+        if (ampm === 'pm') hour24 += 12;
+        return buildCandidateDate(baseDate, hour24, minute);
+      }
+
+      const candidates = [];
+
+      if (hour >= 0 && hour <= 23) {
+        candidates.push(buildCandidateDate(baseDate, hour, minute));
+      }
+
+      if (hour >= 1 && hour <= 12) {
+        const alt = (hour % 12) + 12;
+        candidates.push(buildCandidateDate(baseDate, alt, minute));
+      }
+
+      const futureCandidates = candidates
+        .map((d) => {
+          if (d <= baseDate) {
+            const next = new Date(d);
+            next.setDate(next.getDate() + 1);
+            return next;
+          }
+          return d;
+        })
+        .sort((a, b) => a - b);
+
+      return futureCandidates[0] || null;
+    };
+
+    const extractCurrentTimeFromSentence = (text, fallbackNow) => {
+      const currentPatterns = [
+        /(?:it is|it's|its|currently|right now|now)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+        /current(?:ly)? time\s*(?:is|:)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+      ];
+
+      for (const pattern of currentPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const parsed = parseAmbiguousTime(match[1], fallbackNow);
+          if (parsed) return parsed;
+        }
+      }
+
+      return fallbackNow;
+    };
+
+    const extractDurationSeconds = (text) => {
+      let total = 0;
+
+      const hourRegex = /(\d+)\s*(?:hours?|hrs?|hr|h)\b/gi;
+      const minuteRegex = /(\d+)\s*(?:minutes?|mins?|min|m)\b/gi;
+      const secondRegex = /(\d+)\s*(?:seconds?|secs?|sec|s)\b/gi;
+
+      let match;
+
+      while ((match = hourRegex.exec(text)) !== null) {
+        total += parseInt(match[1], 10) * 3600;
+      }
+
+      while ((match = minuteRegex.exec(text)) !== null) {
+        total += parseInt(match[1], 10) * 60;
+      }
+
+      while ((match = secondRegex.exec(text)) !== null) {
+        total += parseInt(match[1], 10);
+      }
+
+      if (total === 0) {
+        const bareFor = text.match(/\b(?:for|in)\s+(\d+)\b/i);
+        if (bareFor) {
+          total = parseInt(bareFor[1], 10) * 60;
+        }
+      }
+
+      return total;
+    };
+
+    const extractEndTime = (text, baseNow) => {
+      const patterns = [
+        /\b(?:end|done|finish|finished|stop|until|by|at)\s+(?:work\s+)?(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+        /\bto\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const parsed = parseAmbiguousTime(match[1], baseNow);
+          if (parsed) return parsed;
+        }
+      }
+
+      return null;
+    };
+
+    const extractFromToRange = (text, fallbackNow) => {
+      const match = text.match(
+        /\bfrom\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:to|until|-)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+      );
+
+      if (!match) return null;
+
+      const start = parseAmbiguousTime(match[1], fallbackNow);
+      const end = parseAmbiguousTime(match[2], start || fallbackNow);
+
+      if (!start || !end) return null;
+
+      let adjustedEnd = new Date(end);
+      if (adjustedEnd <= start) {
+        adjustedEnd.setDate(adjustedEnd.getDate() + 1);
+      }
+
+      return { start, end: adjustedEnd };
+    };
+
+    const parseNaturalTimerInput = (rawInput) => {
+      const text = rawInput.trim().toLowerCase();
+      const realNow = new Date();
+
+      if (!text) {
+        return {
+          ok: false,
+          message: "Type something like 'end work at 2:30pm, it's currently 11:37am' or 'work for 1 hour 20 min'."
+        };
+      }
+
+      const explicitNow = extractCurrentTimeFromSentence(text, realNow);
+
+      const range = extractFromToRange(text, explicitNow);
+      if (range) {
+        const diffSeconds = Math.round((range.end - range.start) / 1000);
+
+        if (diffSeconds <= 0) {
+          return {
+            ok: false,
+            message: "I found a start and end time, but the duration came out invalid."
+          };
+        }
+
+        return {
+          ok: true,
+          totalSeconds: diffSeconds,
+          startReference: range.start,
+          endReference: range.end,
+          message: `Timer set for ${formatDurationText(diffSeconds)} (${formatFriendlyClock(range.start)} → ${formatFriendlyClock(range.end)}).`
+        };
+      }
+
+      const durationSeconds = extractDurationSeconds(text);
+      if (durationSeconds > 0) {
+        const end = new Date(explicitNow.getTime() + durationSeconds * 1000);
+
+        return {
+          ok: true,
+          totalSeconds: durationSeconds,
+          startReference: explicitNow,
+          endReference: end,
+          message: `Timer set for ${formatDurationText(durationSeconds)}. Ends at ${formatFriendlyClock(end)}.`
+        };
+      }
+
+      const endTime = extractEndTime(text, explicitNow);
+      if (endTime) {
+        let adjustedEnd = new Date(endTime);
+        if (adjustedEnd <= explicitNow) {
+          adjustedEnd.setDate(adjustedEnd.getDate() + 1);
+        }
+
+        const diffSeconds = Math.round((adjustedEnd - explicitNow) / 1000);
+
+        if (diffSeconds <= 0) {
+          return {
+            ok: false,
+            message: "I found the end time, but the timer duration came out invalid."
+          };
+        }
+
+        return {
+          ok: true,
+          totalSeconds: diffSeconds,
+          startReference: explicitNow,
+          endReference: adjustedEnd,
+          message: `Timer set for ${formatDurationText(diffSeconds)}. From ${formatFriendlyClock(explicitNow)} to ${formatFriendlyClock(adjustedEnd)}.`
+        };
+      }
+
+      return {
+        ok: false,
+        message: "Couldn't understand that sentence. Try something like 'end work at 2:30pm, it's currently 11:37am' or 'work for 45 minutes'."
+      };
+    };
+
+    const TimeWheel = ({ startMins, endMins, onChangeStart, onChangeEnd }) => {
+      const svgRef = useRef(null);
+      const [dragging, setDragging] = useState(null);
+
+      const handlePointerDown = (e, type) => {
+        e.stopPropagation();
+        setDragging(type);
+      };
+
+      useEffect(() => {
+        const handleMove = (e) => {
+          if (!dragging) return;
+          e.preventDefault();
+
+          const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+          const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+          const rect = svgRef.current.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const dx = clientX - cx;
+          const dy = clientY - cy;
+
+          let angle = Math.atan2(dy, dx) + Math.PI / 2;
+          if (angle < 0) angle += 2 * Math.PI;
+
+          let mins = Math.round((angle / (2 * Math.PI)) * 1440);
+          mins = Math.round(mins / 5) * 5;
+          if (mins >= 1440) mins = 0;
+
+          if (dragging === 'start') onChangeStart(mins);
+          else if (dragging === 'end') onChangeEnd(mins);
+        };
+
+        const handleUp = () => setDragging(null);
+
+        if (dragging) {
+          window.addEventListener('mousemove', handleMove, { passive: false });
+          window.addEventListener('mouseup', handleUp);
+          window.addEventListener('touchmove', handleMove, { passive: false });
+          window.addEventListener('touchend', handleUp);
+        }
+
+        return () => {
+          window.removeEventListener('mousemove', handleMove);
+          window.removeEventListener('mouseup', handleUp);
+          window.removeEventListener('touchmove', handleMove);
+          window.removeEventListener('touchend', handleUp);
+        };
+      }, [dragging, onChangeStart, onChangeEnd]);
+
+      const cx = 160, cy = 160, r = 110;
+      const startAngle = (startMins / 1440) * 2 * Math.PI;
+      const endAngle = (endMins / 1440) * 2 * Math.PI;
+
+      const startX = cx + r * Math.sin(startAngle);
+      const startY = cy - r * Math.cos(startAngle);
+      const endX = cx + r * Math.sin(endAngle);
+      const endY = cy - r * Math.cos(endAngle);
+
+      let diff = endAngle - startAngle;
+      if (diff < 0) diff += 2 * Math.PI;
+      const largeArcFlag = diff > Math.PI ? "1" : "0";
+
+      let arcPath = "";
+      if (diff > 0) {
+        arcPath = [
+          "M", startX, startY,
+          "A", r, r, 0, largeArcFlag, 1, endX, endY
+        ].join(" ");
+      }
+
+      const durMins = (endMins - startMins + 1440) % 1440;
+      const durH = Math.floor(durMins / 60);
+      const durM = durMins % 60;
+
+      return (
+        <div className="relative flex flex-col items-center select-none py-8">
+          <svg ref={svgRef} width="320" height="320" viewBox="0 0 320 320" className="overflow-visible">
+            <circle cx={cx} cy={cy} r={r} stroke="#27272a" strokeWidth={36} fill="none" />
+
+            {Array.from({ length: 24 }).map((_, i) => {
+              const angle = (i / 24) * 2 * Math.PI;
+              const isCardinal = i % 6 === 0;
+              const x1 = cx + (r - (isCardinal ? 14 : 8)) * Math.sin(angle);
+              const y1 = cy - (r - (isCardinal ? 14 : 8)) * Math.cos(angle);
+              const x2 = cx + (r + (isCardinal ? 14 : 8)) * Math.sin(angle);
+              const y2 = cy - (r + (isCardinal ? 14 : 8)) * Math.cos(angle);
+              return (
+                <line
+                  key={i}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={isCardinal ? "#71717a" : "#3f3f46"}
+                  strokeWidth={isCardinal ? 2 : 1}
+                />
+              );
+            })}
+
+            {arcPath && (
+              <path d={arcPath} stroke="#fafafa" strokeWidth={36} fill="none" strokeLinecap="round" />
+            )}
+
+            <g
+              transform={`translate(${startX}, ${startY})`}
+              onMouseDown={(e) => handlePointerDown(e, 'start')}
+              onTouchStart={(e) => handlePointerDown(e, 'start')}
+              style={{ cursor: 'grab' }}
+            >
+              <circle cx={0} cy={0} r={40} fill="transparent" />
+              <circle cx={0} cy={0} r={22} fill="#18181b" stroke="#fafafa" strokeWidth={4} />
+              <circle cx={0} cy={0} r={6} fill="#fafafa" />
+            </g>
+
+            <g
+              transform={`translate(${endX}, ${endY})`}
+              onMouseDown={(e) => handlePointerDown(e, 'end')}
+              onTouchStart={(e) => handlePointerDown(e, 'end')}
+              style={{ cursor: 'grab' }}
+            >
+              <circle cx={0} cy={0} r={40} fill="transparent" />
+              <circle cx={0} cy={0} r={22} fill="#18181b" stroke="#fafafa" strokeWidth={4} />
+              <rect x={-5} y={-5} width={10} height={10} fill="#fafafa" rx={2} />
+            </g>
+          </svg>
+
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center flex-col">
+            <span className="text-zinc-500 text-[10px] font-semibold tracking-widest uppercase mb-1">
+              Time Passed
+            </span>
+            <span className="text-4xl font-light text-zinc-100 tabular-nums">
+              {durH > 0 ? `${durH}h ` : ''}{durM}m
+            </span>
+          </div>
+        </div>
+      );
+    };
+
+    function App() {
+      const [inputHours, setInputHours] = useState('');
+      const [inputMinutes, setInputMinutes] = useState('');
+      const [inputSeconds, setInputSeconds] = useState('');
+
+      const [timeLeft, setTimeLeft] = useState(0);
+      const [isActive, setIsActive] = useState(false);
+      const [isPaused, setIsPaused] = useState(false);
+      const [isFinished, setIsFinished] = useState(false);
+
+      const [taskName, setTaskName] = useState('');
+      const [parseMessage, setParseMessage] = useState('');
+
+      const [startTime, setStartTime] = useState(null);
+      const [endTime, setEndTime] = useState(null);
+
+      const [calcStartMins, setCalcStartMins] = useState(1320);
+      const [calcEndMins, setCalcEndMins] = useState(420);
+
+      useEffect(() => {
+        const now = new Date();
+        const currentMins = now.getHours() * 60 + now.getMinutes();
+        setCalcStartMins(currentMins);
+        setCalcEndMins((currentMins + 60) % 1440);
+      }, []);
+
+      useEffect(() => {
+        let interval = null;
+
+        if (isActive && !isPaused && timeLeft > 0) {
+          interval = setInterval(() => {
+            setTimeLeft((time) => {
+              if (time <= 1) {
+                clearInterval(interval);
+                setIsActive(false);
+                setIsFinished(true);
+                return 0;
+              }
+              return time - 1;
+            });
+          }, 1000);
+        } else {
+          clearInterval(interval);
+        }
+
+        return () => clearInterval(interval);
+      }, [isActive, isPaused, timeLeft]);
+
+      const handleMagicSetup = () => {
+        const result = parseNaturalTimerInput(taskName);
+
+        if (!result.ok) {
+          setParseMessage(result.message);
+          return;
+        }
+
+        const totalSeconds = result.totalSeconds;
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+
+        setInputHours(h ? String(h) : '');
+        setInputMinutes(m ? String(m) : '');
+        setInputSeconds(s ? String(s) : '');
+        setParseMessage(result.message);
+      };
+
+      const handleStart = () => {
+        const h = parseInt(inputHours || 0, 10);
+        const m = parseInt(inputMinutes || 0, 10);
+        const s = parseInt(inputSeconds || 0, 10);
+
+        const totalSeconds = h * 3600 + m * 60 + s;
+        if (totalSeconds <= 0) return;
+
+        const now = new Date();
+        const end = new Date(now.getTime() + totalSeconds * 1000);
+
+        setTimeLeft(totalSeconds);
+        setStartTime(now);
+        setEndTime(end);
+        setIsActive(true);
+        setIsPaused(false);
+        setIsFinished(false);
+      };
+
+      const handlePauseResume = () => {
+        if (isPaused) {
+          const newEndTime = new Date(Date.now() + timeLeft * 1000);
+          setEndTime(newEndTime);
+          setIsPaused(false);
+        } else {
+          setIsPaused(true);
+        }
+      };
+
+      const handleReset = () => {
+        setIsActive(false);
+        setIsPaused(false);
+        setIsFinished(false);
+        setTimeLeft(0);
+        setStartTime(null);
+        setEndTime(null);
+        setTaskName('');
+        setParseMessage('');
+      };
+
+      const formatTimeDisplay = (totalSeconds) => {
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+
+        if (h > 0) {
+          return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+        }
+        return `${pad2(m)}:${pad2(s)}`;
+      };
+
+      const formatClockTime = (date) => {
+        if (!date) return '--:--';
+        return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      };
+
+      const handleNumberInput = (e, setter, max) => {
+        let val = e.target.value.replace(/\D/g, '');
+        if (val !== '' && parseInt(val, 10) > max && max !== -1) {
+          val = max.toString();
+        }
+        if (val.length > 2) val = val.slice(0, 2);
+        setter(val);
+      };
+
+      return (
+        <div className="relative flex flex-col items-center justify-center min-h-screen bg-zinc-950 text-zinc-100 selection:bg-zinc-800 py-12">
+          <div className="flex flex-col items-center z-10 w-full px-6 max-w-6xl">
+            {!isActive && !isPaused && timeLeft === 0 && !isFinished ? (
+              <div className="flex flex-col xl:flex-row items-center justify-center w-full gap-16 xl:gap-32">
+                <div className="flex flex-col items-center w-full max-w-md">
+                  <h1 className="text-zinc-500 mb-8 tracking-widest uppercase text-sm font-medium">
+                    Set Timer
+                  </h1>
+
+                  <div className="flex flex-col items-center mb-10 w-full">
+                    <div className="relative w-full flex shadow-sm">
+                      <input
+                        type="text"
+                        placeholder="Type something like: end work at 2:30pm, it's currently 11:37am"
+                        value={taskName}
+                        onChange={(e) => setTaskName(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleMagicSetup()}
+                        className="w-full bg-zinc-900 text-zinc-100 px-5 py-4 rounded-l-2xl focus:outline-none focus:ring-1 focus:ring-zinc-600 border border-zinc-800 border-r-0 placeholder:text-zinc-600 text-sm transition-all"
+                      />
+                      <button
+                        onClick={handleMagicSetup}
+                        disabled={!taskName}
+                        className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-5 py-4 rounded-r-2xl border border-zinc-800 flex items-center justify-center transition-colors disabled:opacity-50"
+                        title="Parse timer sentence"
+                      >
+                        ✨
+                      </button>
+                    </div>
+
+                    {parseMessage && (
+                      <div className="mt-4 text-sm text-zinc-300 text-center bg-zinc-900/60 px-4 py-3 rounded-xl border border-zinc-800/80">
+                        ✨ {parseMessage}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center space-x-2 md:space-x-4 mb-12 text-5xl md:text-7xl font-light text-zinc-400">
+                    <div className="flex flex-col items-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="00"
+                        value={inputHours}
+                        onChange={(e) => handleNumberInput(e, setInputHours, 99)}
+                        className="w-24 md:w-32 bg-transparent text-center text-zinc-100 border-b border-zinc-800 focus:border-zinc-400 focus:outline-none transition-colors pb-2 placeholder:text-zinc-800"
+                      />
+                      <span className="text-xs text-zinc-600 uppercase tracking-widest mt-4">Hours</span>
+                    </div>
+
+                    <span className="pb-8">:</span>
+
+                    <div className="flex flex-col items-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="00"
+                        value={inputMinutes}
+                        onChange={(e) => handleNumberInput(e, setInputMinutes, 59)}
+                        className="w-24 md:w-32 bg-transparent text-center text-zinc-100 border-b border-zinc-800 focus:border-zinc-400 focus:outline-none transition-colors pb-2 placeholder:text-zinc-800"
+                      />
+                      <span className="text-xs text-zinc-600 uppercase tracking-widest mt-4">Minutes</span>
+                    </div>
+
+                    <span className="pb-8">:</span>
+
+                    <div className="flex flex-col items-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="00"
+                        value={inputSeconds}
+                        onChange={(e) => handleNumberInput(e, setInputSeconds, 59)}
+                        className="w-24 md:w-32 bg-transparent text-center text-zinc-100 border-b border-zinc-800 focus:border-zinc-400 focus:outline-none transition-colors pb-2 placeholder:text-zinc-800"
+                      />
+                      <span className="text-xs text-zinc-600 uppercase tracking-widest mt-4">Seconds</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleStart}
+                    disabled={!inputHours && !inputMinutes && !inputSeconds}
+                    className="flex items-center space-x-2 bg-zinc-100 text-zinc-950 px-8 py-4 rounded-full font-medium hover:bg-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <span>▶</span>
+                    <span>Start Timer</span>
+                  </button>
+                </div>
+
+                <div className="hidden xl:block w-px h-80 bg-zinc-800/50"></div>
+                <div className="xl:hidden w-full h-px bg-zinc-800/50 max-w-sm my-4"></div>
+
+                <div className="flex flex-col items-center w-full max-w-md">
+                  <h2 className="text-zinc-500 mb-2 tracking-widest uppercase text-sm font-medium">
+                    Time Calculator
+                  </h2>
+
+                  <TimeWheel
+                    startMins={calcStartMins}
+                    endMins={calcEndMins}
+                    onChangeStart={setCalcStartMins}
+                    onChangeEnd={setCalcEndMins}
+                  />
+
+                  <div className="flex justify-between items-center bg-zinc-900/40 rounded-2xl p-4 border border-zinc-800/50 mt-4 w-full max-w-sm">
+                    <div className="flex flex-col">
+                      <span className="text-zinc-500 text-[10px] tracking-widest uppercase mb-1">
+                        Start
+                      </span>
+                      <span className="text-xl text-zinc-100">{formatTimeFromMins(calcStartMins)}</span>
+                    </div>
+
+                    <div className="h-8 w-px bg-zinc-800"></div>
+
+                    <div className="flex flex-col items-end">
+                      <span className="text-zinc-500 text-[10px] tracking-widest uppercase mb-1">
+                        End
+                      </span>
+                      <span className="text-xl text-zinc-100">{formatTimeFromMins(calcEndMins)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center w-full max-w-4xl text-center">
+                {taskName && (
+                  <h3 className="text-xl md:text-2xl text-zinc-200 mb-2 font-medium tracking-wide">
+                    {taskName}
+                  </h3>
+                )}
+
+                {parseMessage && (
+                  <p className="text-zinc-400 max-w-lg mb-8 text-sm md:text-base italic leading-relaxed">
+                    "{parseMessage}"
+                  </p>
+                )}
+
+                {isFinished ? (
+                  <h2 className="text-zinc-500 mb-6 tracking-widest uppercase text-sm font-medium">
+                    Time's Up
+                  </h2>
+                ) : (
+                  <h2 className="text-zinc-500 mb-6 tracking-widest uppercase text-sm font-medium h-5">
+                    {isPaused ? 'Paused' : 'Running'}
+                  </h2>
+                )}
+
+                <div className={`text-7xl sm:text-9xl md:text-[12rem] font-light tracking-tighter tabular-nums mb-12 ${isFinished ? 'text-zinc-600' : 'text-zinc-50'}`}>
+                  {formatTimeDisplay(timeLeft)}
+                </div>
+
+                <div className="flex items-center space-x-6">
+                  {!isFinished && (
+                    <button
+                      onClick={handlePauseResume}
+                      className="w-16 h-16 rounded-full border border-zinc-800 flex items-center justify-center text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors text-xl"
+                    >
+                      {isPaused ? '▶' : '⏸'}
+                    </button>
+                  )}
+
+                  <button
+                    onClick={handleReset}
+                    className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors text-xl"
+                  >
+                    {isFinished ? '✕' : '■'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {(isActive || isPaused || isFinished) && (
+            <div className="absolute bottom-0 left-0 w-full p-6 md:p-10 flex justify-between items-end text-sm text-zinc-500">
+              <div className="flex flex-col gap-1">
+                <span className="uppercase tracking-widest text-xs text-zinc-600 font-semibold">
+                  Start Time
+                </span>
+                <span className="text-zinc-300 font-medium text-lg">
+                  {formatClockTime(startTime)}
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-1 text-right">
+                <span className="uppercase tracking-widest text-xs text-zinc-600 font-semibold">
+                  {isFinished ? 'Ended At' : 'Expected End'}
+                </span>
+                <span className="text-zinc-300 font-medium text-lg">
+                  {formatClockTime(endTime)}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
