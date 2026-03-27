@@ -4,12 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Timer App</title>
-
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
   <style>
     body {
       margin: 0;
@@ -26,7 +24,7 @@
 
     const formatTimeFromMins = (mins) => {
       let h = Math.floor(mins / 60);
-      let m = mins % 60;
+      const m = mins % 60;
       const ampm = h >= 12 ? 'PM' : 'AM';
       h = h % 12;
       if (h === 0) h = 12;
@@ -39,7 +37,6 @@
       const h = Math.floor(totalSeconds / 3600);
       const m = Math.floor((totalSeconds % 3600) / 60);
       const s = totalSeconds % 60;
-
       const parts = [];
       if (h) parts.push(`${h}h`);
       if (m) parts.push(`${m}m`);
@@ -79,11 +76,9 @@
       }
 
       const candidates = [];
-
       if (hour >= 0 && hour <= 23) {
         candidates.push(buildCandidateDate(baseDate, hour, minute));
       }
-
       if (hour >= 1 && hour <= 12) {
         const alt = (hour % 12) + 12;
         candidates.push(buildCandidateDate(baseDate, alt, minute));
@@ -122,21 +117,17 @@
 
     const extractDurationSeconds = (text) => {
       let total = 0;
-
       const hourRegex = /(\d+)\s*(?:hours?|hrs?|hr|h)\b/gi;
       const minuteRegex = /(\d+)\s*(?:minutes?|mins?|min|m)\b/gi;
       const secondRegex = /(\d+)\s*(?:seconds?|secs?|sec|s)\b/gi;
-
       let match;
 
       while ((match = hourRegex.exec(text)) !== null) {
         total += parseInt(match[1], 10) * 3600;
       }
-
       while ((match = minuteRegex.exec(text)) !== null) {
         total += parseInt(match[1], 10) * 60;
       }
-
       while ((match = secondRegex.exec(text)) !== null) {
         total += parseInt(match[1], 10);
       }
@@ -153,8 +144,9 @@
 
     const extractEndTime = (text, baseNow) => {
       const patterns = [
-        /\b(?:end|done|finish|finished|stop|until|by|at)\s+(?:work\s+)?(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
-        /\bto\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+        /\b(?:end|done|finish|finished|stop|until|by|at|leave|home)\s+(?:work\s+)?(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+        /\bto\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+        /\b(?:leave|leaving|go home|going home|head home|headed home)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
       ];
 
       for (const pattern of patterns) {
@@ -177,15 +169,67 @@
 
       const start = parseAmbiguousTime(match[1], fallbackNow);
       const end = parseAmbiguousTime(match[2], start || fallbackNow);
-
       if (!start || !end) return null;
 
-      let adjustedEnd = new Date(end);
+      const adjustedEnd = new Date(end);
       if (adjustedEnd <= start) {
         adjustedEnd.setDate(adjustedEnd.getDate() + 1);
       }
 
       return { start, end: adjustedEnd };
+    };
+
+    const extractLooseTimeTokens = (text) => {
+      const matches = [...text.matchAll(/\b(?:\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm))\b/gi)];
+      return matches.map((m) => m[0].trim());
+    };
+
+    const inferTimerFromLooseTimes = (text, explicitNow, realNow) => {
+      const tokens = extractLooseTimeTokens(text);
+      if (tokens.length === 0) return null;
+
+      if (tokens.length >= 2) {
+        const assumedStart = parseAmbiguousTime(tokens[0], realNow);
+        if (!assumedStart) return null;
+
+        let assumedEnd = parseAmbiguousTime(tokens[tokens.length - 1], assumedStart);
+        if (!assumedEnd) return null;
+
+        if (assumedEnd <= assumedStart) {
+          assumedEnd = new Date(assumedEnd);
+          assumedEnd.setDate(assumedEnd.getDate() + 1);
+        }
+
+        const diffSeconds = Math.round((assumedEnd - assumedStart) / 1000);
+        if (diffSeconds <= 0) return null;
+
+        return {
+          ok: true,
+          totalSeconds: diffSeconds,
+          startReference: assumedStart,
+          endReference: assumedEnd,
+          message: `Assumed timer from ${formatFriendlyClock(assumedStart)} to ${formatFriendlyClock(assumedEnd)} (${formatDurationText(diffSeconds)}).`
+        };
+      }
+
+      const assumedEnd = parseAmbiguousTime(tokens[0], explicitNow);
+      if (!assumedEnd) return null;
+
+      const adjustedEnd = new Date(assumedEnd);
+      if (adjustedEnd <= explicitNow) {
+        adjustedEnd.setDate(adjustedEnd.getDate() + 1);
+      }
+
+      const diffSeconds = Math.round((adjustedEnd - explicitNow) / 1000);
+      if (diffSeconds <= 0) return null;
+
+      return {
+        ok: true,
+        totalSeconds: diffSeconds,
+        startReference: explicitNow,
+        endReference: adjustedEnd,
+        message: `Assumed ${formatFriendlyClock(adjustedEnd)} is your end time. Timer set for ${formatDurationText(diffSeconds)}.`
+      };
     };
 
     const parseNaturalTimerInput = (rawInput) => {
@@ -200,15 +244,13 @@
       }
 
       const explicitNow = extractCurrentTimeFromSentence(text, realNow);
-
       const range = extractFromToRange(text, explicitNow);
       if (range) {
         const diffSeconds = Math.round((range.end - range.start) / 1000);
-
         if (diffSeconds <= 0) {
           return {
             ok: false,
-            message: "I found a start and end time, but the duration came out invalid."
+            message: 'I found a start and end time, but the duration came out invalid.'
           };
         }
 
@@ -224,7 +266,6 @@
       const durationSeconds = extractDurationSeconds(text);
       if (durationSeconds > 0) {
         const end = new Date(explicitNow.getTime() + durationSeconds * 1000);
-
         return {
           ok: true,
           totalSeconds: durationSeconds,
@@ -236,17 +277,16 @@
 
       const endTime = extractEndTime(text, explicitNow);
       if (endTime) {
-        let adjustedEnd = new Date(endTime);
+        const adjustedEnd = new Date(endTime);
         if (adjustedEnd <= explicitNow) {
           adjustedEnd.setDate(adjustedEnd.getDate() + 1);
         }
 
         const diffSeconds = Math.round((adjustedEnd - explicitNow) / 1000);
-
         if (diffSeconds <= 0) {
           return {
             ok: false,
-            message: "I found the end time, but the timer duration came out invalid."
+            message: 'I found the end time, but the timer duration came out invalid.'
           };
         }
 
@@ -257,6 +297,11 @@
           endReference: adjustedEnd,
           message: `Timer set for ${formatDurationText(diffSeconds)}. From ${formatFriendlyClock(explicitNow)} to ${formatFriendlyClock(adjustedEnd)}.`
         };
+      }
+
+      const inferred = inferTimerFromLooseTimes(text, explicitNow, realNow);
+      if (inferred) {
+        return inferred;
       }
 
       return {
@@ -281,7 +326,6 @@
 
           const clientX = e.touches ? e.touches[0].clientX : e.clientX;
           const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
           const rect = svgRef.current.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
@@ -316,10 +360,11 @@
         };
       }, [dragging, onChangeStart, onChangeEnd]);
 
-      const cx = 160, cy = 160, r = 110;
+      const cx = 160;
+      const cy = 160;
+      const r = 110;
       const startAngle = (startMins / 1440) * 2 * Math.PI;
       const endAngle = (endMins / 1440) * 2 * Math.PI;
-
       const startX = cx + r * Math.sin(startAngle);
       const startY = cy - r * Math.cos(startAngle);
       const endX = cx + r * Math.sin(endAngle);
@@ -327,14 +372,14 @@
 
       let diff = endAngle - startAngle;
       if (diff < 0) diff += 2 * Math.PI;
-      const largeArcFlag = diff > Math.PI ? "1" : "0";
+      const largeArcFlag = diff > Math.PI ? '1' : '0';
 
-      let arcPath = "";
+      let arcPath = '';
       if (diff > 0) {
         arcPath = [
-          "M", startX, startY,
-          "A", r, r, 0, largeArcFlag, 1, endX, endY
-        ].join(" ");
+          'M', startX, startY,
+          'A', r, r, 0, largeArcFlag, 1, endX, endY
+        ].join(' ');
       }
 
       const durMins = (endMins - startMins + 1440) % 1440;
@@ -353,6 +398,7 @@
               const y1 = cy - (r - (isCardinal ? 14 : 8)) * Math.cos(angle);
               const x2 = cx + (r + (isCardinal ? 14 : 8)) * Math.sin(angle);
               const y2 = cy - (r + (isCardinal ? 14 : 8)) * Math.cos(angle);
+
               return (
                 <line
                   key={i}
@@ -360,7 +406,7 @@
                   y1={y1}
                   x2={x2}
                   y2={y2}
-                  stroke={isCardinal ? "#71717a" : "#3f3f46"}
+                  stroke={isCardinal ? '#71717a' : '#3f3f46'}
                   strokeWidth={isCardinal ? 2 : 1}
                 />
               );
@@ -409,18 +455,14 @@
       const [inputHours, setInputHours] = useState('');
       const [inputMinutes, setInputMinutes] = useState('');
       const [inputSeconds, setInputSeconds] = useState('');
-
       const [timeLeft, setTimeLeft] = useState(0);
       const [isActive, setIsActive] = useState(false);
       const [isPaused, setIsPaused] = useState(false);
       const [isFinished, setIsFinished] = useState(false);
-
       const [taskName, setTaskName] = useState('');
       const [parseMessage, setParseMessage] = useState('');
-
       const [startTime, setStartTime] = useState(null);
       const [endTime, setEndTime] = useState(null);
-
       const [calcStartMins, setCalcStartMins] = useState(1320);
       const [calcEndMins, setCalcEndMins] = useState(420);
 
@@ -455,7 +497,6 @@
 
       const handleMagicSetup = () => {
         const result = parseNaturalTimerInput(taskName);
-
         if (!result.ok) {
           setParseMessage(result.message);
           return;
@@ -476,8 +517,8 @@
         const h = parseInt(inputHours || 0, 10);
         const m = parseInt(inputMinutes || 0, 10);
         const s = parseInt(inputSeconds || 0, 10);
-
         const totalSeconds = h * 3600 + m * 60 + s;
+
         if (totalSeconds <= 0) return;
 
         const now = new Date();
